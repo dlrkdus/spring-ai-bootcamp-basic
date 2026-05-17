@@ -1,3 +1,6 @@
+data:
+  document-paths: data/layer1_faq,data/layer2_policies/current
+
 spring:
   application:
     name: spring-ai-bootcamp-basic
