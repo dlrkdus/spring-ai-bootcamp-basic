@@ -1,22 +1,22 @@
 {
   "total": 150,
-  "correct": 58,
-  "incorrect": 92,
+  "correct": 78,
+  "incorrect": 72,
   "error": 0,
-  "accuracy": 0.38666666666666666,
+  "accuracy": 0.52,
   "tier_results": {
     "easy": {
-      "correct": 11,
+      "correct": 17,
       "total": 30
     },
     "medium": {
-      "correct": 40,
+      "correct": 49,
       "total": 94
     },
     "hard": {
-      "correct": 7,
+      "correct": 12,
       "total": 26
     }
   },
-  "elapsed_seconds": 363.1694836616516
+  "elapsed_seconds": 404.0673279762268
 }
