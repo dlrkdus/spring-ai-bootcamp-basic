@@ -1,6 +1,7 @@
 data:
   document-paths: data/layer1_faq,data/layer2_policies/current
   chatlog-path: data/layer3_chatlogs
+  vector-store-path: data/vector-store.json
 
 spring:
   application:

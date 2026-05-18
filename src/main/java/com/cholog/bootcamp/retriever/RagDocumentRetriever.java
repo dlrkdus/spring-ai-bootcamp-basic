@@ -8,6 +8,7 @@ import org.springframework.ai.vectorstore.SimpleVectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,18 +36,24 @@ public class RagDocumentRetriever implements DocumentRetriever {
     public RagDocumentRetriever(
             SimpleVectorStore vectorStore,
             @Value("${data.document-paths}") String[] documentPaths,
-            @Value("${data.chatlog-path}") String chatlogPath
+            @Value("${data.chatlog-path}") String chatlogPath,
+            @Value("${data.vector-store-path}") String vectorStorePath
     ) {
         this.vectorStore = vectorStore;
 
-        List<Document> documents = new ArrayList<>();
-        Arrays.stream(documentPaths)
-                .map(Path::of)
-                .flatMap(this::listMarkdownFiles)
-                .forEach(file -> documents.addAll(chunkMarkdown(file)));
-        documents.addAll(loadCorrectChatLogs(Path.of(chatlogPath)));
-
-        vectorStore.add(documents);
+        File storeFile = new File(vectorStorePath);
+        if (storeFile.exists()) {
+            vectorStore.load(storeFile);
+        } else {
+            List<Document> documents = new ArrayList<>();
+            Arrays.stream(documentPaths)
+                    .map(Path::of)
+                    .flatMap(this::listMarkdownFiles)
+                    .forEach(file -> documents.addAll(chunkMarkdown(file)));
+            documents.addAll(loadCorrectChatLogs(Path.of(chatlogPath)));
+            vectorStore.add(documents);
+            vectorStore.save(storeFile);
+        }
     }
 
     @Override
