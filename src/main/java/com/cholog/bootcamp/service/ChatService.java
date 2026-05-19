@@ -9,6 +9,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 
 @Service
 @RequiredArgsConstructor
@@ -17,20 +18,33 @@ public class ChatService {
     private final ChatClient chatClient;
     private final DocumentRetriever documentRetriever;
 
+    private String buildSystemPrompt(String context) {
+        return """
+                당신은 Cholog Corporation의 고객 상담 AI입니다.
+                아래 참고 자료를 바탕으로 답변하세요. 자료에 없는 내용은 모른다고 답변하세요.
+                정책 문서([policy])와 상담 이력([상담 이력])이 충돌하면 정책 문서를 따르세요.
+
+                [참고 자료]
+                %s
+                """.formatted(context);
+    }
+
+    public Flux<String> streamMessage(ChatBotRequest request) {
+        String context = documentRetriever.retrieve(request.question());
+        return chatClient.prompt()
+                .system(buildSystemPrompt(context))
+                .user(request.question())
+                .stream()
+                .content();
+    }
+
     public ChatBotResponse sendMessage(ChatBotRequest chatBotRequest) {
 
         String question = chatBotRequest.question();
         String context = documentRetriever.retrieve(question);
 
         ChatResponse response = chatClient.prompt()
-                .system("""
-                        당신은 Cholog Corporation의 고객 상담 AI입니다.
-                        아래 참고 자료를 바탕으로 답변하세요. 자료에 없는 내용은 모른다고 답변하세요.
-                        정책 문서([policy])와 상담 이력([상담 이력])이 충돌하면 정책 문서를 따르세요.
-
-                        [참고 자료]
-                        %s
-                        """.formatted(context))
+                .system(buildSystemPrompt(context))
                 .user(question)
                 .call()
                 .chatResponse();
