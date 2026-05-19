@@ -11,8 +11,9 @@ LLM 판정으로 정확도를 측정합니다.
 실행:
   # 서버가 localhost:8080에서 실행 중이어야 합니다
   .venv/bin/python evaluate.py
-  .venv/bin/python evaluate.py --verbose    # 질문별 상세 출력
-  .venv/bin/python evaluate.py --limit 10   # 처음 10개만 평가
+  .venv/bin/python evaluate.py --verbose       # 질문별 상세 출력
+  .venv/bin/python evaluate.py --limit 10      # 처음 10개만 평가
+  .venv/bin/python evaluate.py --parallel 10   # 병렬 워커 10개로 가속
 
 비용:
   judge 모델(gpt-4o-mini) 사용, 100문항 기준 약 $0.3~0.5
@@ -22,6 +23,7 @@ import json
 import os
 import argparse
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -102,12 +104,43 @@ JSON으로만 응답하세요:
         return {"score": 0, "reason": "판정 파싱 실패"}
 
 
+# ─── 워커 ─────────────────────────────────────────────────────────────────────
+
+def process_question(q: dict, idx: int) -> dict:
+    """질문 1건을 처리해 결과 dict를 반환합니다. (스레드 안전)"""
+    start = time.time()
+    qid = q.get("id", f"Q{idx+1}")
+    question_ko = q["question_ko"]
+    expected = q["expected_answer"]
+    tier = q.get("tier", "unknown")
+
+    response = ask_server(question_ko)
+    if response is None:
+        return {"qid": qid, "tier": tier, "status": "error", "question": question_ko,
+                "duration": time.time() - start}
+
+    actual_answer = response.get("answer", "")
+    judgment = judge_answer(question_ko, expected, actual_answer)
+    score = judgment.get("score", 0)
+
+    return {
+        "qid": qid,
+        "tier": tier,
+        "status": "ok",
+        "score": score,
+        "reason": judgment.get("reason", ""),
+        "question": question_ko,
+        "duration": time.time() - start,
+    }
+
+
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="챗봇 품질 평가")
     parser.add_argument("--verbose", action="store_true", help="질문별 상세 출력")
     parser.add_argument("--limit", type=int, default=0, help="평가할 질문 수 제한 (0=전체)")
+    parser.add_argument("--parallel", type=int, default=1, help="병렬 워커 수 (default: 1, 순차 실행)")
     args = parser.parse_args()
 
     # 테스트 질문 로드
@@ -122,6 +155,8 @@ def main():
     print(f"서버: {SERVER_URL}")
     print(f"질문 수: {len(questions)}")
     print(f"판정 모델: {JUDGE_MODEL}")
+    if args.parallel > 1:
+        print(f"병렬 워커: {args.parallel}")
     print()
 
     # 서버 연결 확인
@@ -133,48 +168,93 @@ def main():
 
     results = {"correct": 0, "incorrect": 0, "error": 0}
     tier_results = {}
+    durations = []
     start_time = time.time()
 
-    for i, q in enumerate(questions):
-        qid = q.get("id", f"Q{i+1}")
-        question_ko = q["question_ko"]
-        expected = q["expected_answer"]
-        tier = q.get("tier", "unknown")
+    if args.parallel > 1:
+        # ─── 병렬 실행 (워커는 결과만 반환, 집계는 메인 스레드에서) ───
+        completed = 0
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = [executor.submit(process_question, q, i) for i, q in enumerate(questions)]
 
-        if tier not in tier_results:
-            tier_results[tier] = {"correct": 0, "total": 0}
-        tier_results[tier]["total"] += 1
+            for fut in as_completed(futures):
+                r = fut.result()
+                durations.append(r["duration"])
+                completed += 1
+                tier = r["tier"]
 
-        # 서버에 질문
-        response = ask_server(question_ko)
-        if response is None:
-            results["error"] += 1
+                if tier not in tier_results:
+                    tier_results[tier] = {"correct": 0, "total": 0}
+                tier_results[tier]["total"] += 1
+
+                if r["status"] == "error":
+                    results["error"] += 1
+                    if args.verbose:
+                        print(f"[{r['qid']}] ERROR — 서버 응답 없음")
+                else:
+                    score = r["score"]
+                    if score == 1:
+                        results["correct"] += 1
+                        tier_results[tier]["correct"] += 1
+                        marker = "✓"
+                    else:
+                        results["incorrect"] += 1
+                        marker = "✗"
+
+                    if args.verbose:
+                        print(f"[{r['qid']}] {marker} ({tier}) {r['question'][:40]}...")
+                        if score == 0:
+                            print(f"        이유: {r['reason'][:80]}")
+
+                # 진행률 (10개마다)
+                if not args.verbose and completed % 10 == 0:
+                    print(f"  진행: {completed}/{len(questions)}")
+    else:
+        # ─── 순차 실행 (기본) ───
+        for i, q in enumerate(questions):
+            q_start = time.time()
+            qid = q.get("id", f"Q{i+1}")
+            question_ko = q["question_ko"]
+            expected = q["expected_answer"]
+            tier = q.get("tier", "unknown")
+
+            if tier not in tier_results:
+                tier_results[tier] = {"correct": 0, "total": 0}
+            tier_results[tier]["total"] += 1
+
+            # 서버에 질문
+            response = ask_server(question_ko)
+            if response is None:
+                results["error"] += 1
+                durations.append(time.time() - q_start)
+                if args.verbose:
+                    print(f"[{qid}] ERROR — 서버 응답 없음")
+                continue
+
+            actual_answer = response.get("answer", "")
+
+            # LLM 판정
+            judgment = judge_answer(question_ko, expected, actual_answer)
+            score = judgment.get("score", 0)
+
+            if score == 1:
+                results["correct"] += 1
+                tier_results[tier]["correct"] += 1
+                marker = "✓"
+            else:
+                results["incorrect"] += 1
+                marker = "✗"
+
             if args.verbose:
-                print(f"[{qid}] ERROR — 서버 응답 없음")
-            continue
+                print(f"[{qid}] {marker} ({tier}) {question_ko[:40]}...")
+                if score == 0:
+                    print(f"        이유: {judgment.get('reason', '')[:80]}")
 
-        actual_answer = response.get("answer", "")
+            durations.append(time.time() - q_start)
 
-        # LLM 판정
-        judgment = judge_answer(question_ko, expected, actual_answer)
-        score = judgment.get("score", 0)
-
-        if score == 1:
-            results["correct"] += 1
-            tier_results[tier]["correct"] += 1
-            marker = "✓"
-        else:
-            results["incorrect"] += 1
-            marker = "✗"
-
-        if args.verbose:
-            print(f"[{qid}] {marker} ({tier}) {question_ko[:40]}...")
-            if score == 0:
-                print(f"        이유: {judgment.get('reason', '')[:80]}")
-
-        # 진행률 (10개마다)
-        if not args.verbose and (i + 1) % 10 == 0:
-            print(f"  진행: {i+1}/{len(questions)}")
+            # 진행률 (10개마다)
+            if not args.verbose and (i + 1) % 10 == 0:
+                print(f"  진행: {i+1}/{len(questions)}")
 
     # 결과 출력
     elapsed = time.time() - start_time
@@ -194,8 +274,10 @@ def main():
     if results["error"] > 0:
         print(f"\n  에러: {results['error']}건")
 
-    print(f"\n소요 시간: {elapsed:.1f}초")
-    print(f"평균 응답: {elapsed/max(total,1):.1f}초/질문")
+    print(f"\n벽시계 시간: {elapsed:.1f}초")
+    if durations:
+        avg_response = sum(durations) / len(durations)
+        print(f"평균 응답: {avg_response:.1f}초/질문")
 
     # 결과 저장
     result_file = DATA_DIR / "eval_result.json"
@@ -208,6 +290,7 @@ def main():
             "accuracy": results["correct"] / max(total, 1),
             "tier_results": tier_results,
             "elapsed_seconds": elapsed,
+            "avg_response_seconds": (sum(durations) / len(durations)) if durations else 0,
         }, f, indent=2, ensure_ascii=False)
     print(f"\n결과 저장: {result_file}")
 

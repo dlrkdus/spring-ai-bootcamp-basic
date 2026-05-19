@@ -1,5 +1,5 @@
 data:
-  document-paths: data/layer1_faq,data/layer2_policies/current
+  document-paths: data/layer1_faq,data/layer2_policies/current,data/layer2_policies/internal,data/layer2_policies/deprecated
   chatlog-path: data/layer3_chatlogs
   vector-store-path: data/vector-store.json
 
